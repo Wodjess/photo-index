@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#05070D">
+  <title>Поиск изображений</title>
+  <style>
+    :root {
+      --bg:           #05070D;
+      --card:         #0D111A;
+      --border:       rgba(255, 255, 255, 0.06);
+      --border-soft:  rgba(255, 255, 255, 0.04);
+      --accent:       #7C4DFF;
+      --accent-soft:  rgba(124, 77, 255, 0.10);
+      --text:         #FFFFFF;
+      --text-muted:   rgba(255, 255, 255, 0.6);
+
+      --bg-glass:     rgba(13, 17, 26, 0.72);
+      --shadow-card:  0 6px 30px rgba(0, 0, 0, 0.35);
+      --shadow-deep:  0 20px 60px rgba(0, 0, 0, 0.6);
+
+      --glow:         0 0 0 4px rgba(124, 77, 255, 0.10), 0 0 40px rgba(124, 77, 255, 0.18);
+      --glow-strong:  0 0 0 6px rgba(124, 77, 255, 0.22), 0 0 70px rgba(124, 77, 255, 0.32);
+
+      --radius-card:  16px;
+      --radius-pill:  32px;
+
+      --easing:       cubic-bezier(0.22, 1, 0.36, 1);
+      --t-fast:       200ms;
+      --t-base:       250ms;
+      --t-slow:       350ms;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, "SF Pro Text", "Inter", "Segoe UI", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      min-height: 100%;
+      overscroll-behavior-y: none;
+    }
+
+    body { min-height: 100vh; }
+
+    /* ── Page container (ТЗ §9: 80px top, 40px sides) ─────────────────── */
+    .wrap {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 80px 40px 80px;
+    }
+    @media (max-width: 640px) {
+      .wrap { padding: 48px 16px 64px; }
+    }
+
+    /* ── Search bar (ТЗ §5.2) ─────────────────────────────────────────── */
+    .search-bar {
+      position: relative;
+      max-width: 900px;
+      margin: 0 auto;
+      height: 64px;
+      display: flex;
+      align-items: center;
+      background: var(--bg-glass);
+      backdrop-filter: blur(20px) saturate(140%);
+      -webkit-backdrop-filter: blur(20px) saturate(140%);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-pill);
+      box-shadow: var(--glow);
+      transition: box-shadow 0.3s ease, border-color 0.3s ease, transform 0.3s ease;
+    }
+    .search-bar:focus-within {
+      border-color: rgba(124, 77, 255, 0.45);
+      box-shadow: var(--glow-strong);
+    }
+
+    .search-bar input {
+      flex: 1;
+      height: 100%;
+      padding: 0 24px;
+      background: transparent;
+      border: 0;
+      outline: 0;
+      color: var(--text);
+      font-size: 16px;
+      font-family: inherit;
+      letter-spacing: 0.01em;
+    }
+    .search-bar input::placeholder { color: var(--text-muted); }
+    .search-bar input:focus { outline: 0; }
+
+    .search-btn {
+      flex: 0 0 auto;
+      width: 44px;
+      height: 44px;
+      margin-right: 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      border-radius: 50%;
+      cursor: pointer;
+      transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+      box-shadow: 0 0 0 0 rgba(124, 77, 255, 0.0);
+    }
+    .search-btn:hover { background: #8A5CFF; transform: scale(1.05); }
+    .search-btn:active { transform: scale(0.95); }
+    .search-btn svg { width: 18px; height: 18px; }
+
+    /* ── Grid (Pinterest masonry, 4-Round fix: no horizontal scroll) ─────── */
+    .grid {
+      margin-top: 40px;
+      column-count: 3;
+      column-gap: 16px;
+      opacity: 0;
+      transition: opacity var(--t-base) ease;
+    }
+    .grid.is-ready { opacity: 1; }
+    @media (min-width: 640px) and (max-width: 1023.98px) {
+      .grid { column-count: 2; }
+    }
+    @media (max-width: 639.98px) {
+      .grid { column-count: 1; }
+    }
+
+    /* Card: flow into columns. Width = column width (auto from column-count).
+       Height driven by aspect-ratio stamped by JS from naturalWidth/Height.
+       break-inside: avoid keeps a card from being split across columns. */
+    .card {
+      display: block;
+      width: 100%;
+      margin: 0 0 16px;
+      break-inside: avoid;
+      -webkit-column-break-inside: avoid;
+      page-break-inside: avoid;
+      position: relative;
+      overflow: hidden;
+      background: var(--card);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius-card);
+      box-shadow: var(--shadow-card);
+      cursor: zoom-in;
+      transform: scale(1);
+      transition: transform var(--t-base) ease, box-shadow var(--t-base) ease, border-color var(--t-base) ease;
+      aspect-ratio: 4 / 3; /* fallback; JS overwrites with natural ratio */
+    }
+    .card:hover {
+      transform: scale(1.02);
+      border-color: var(--border);
+      box-shadow: var(--shadow-deep);
+    }
+    .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* ── Card image (4-Round fix: drag-suppression + contain) ─────────── */
+    .card img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;            /* Bug-4: show the whole image, no crop */
+      filter: blur(20px);             /* Bug-4: blur-up preview */
+      transition: filter 280ms ease, opacity var(--t-fast) ease;
+      will-change: filter, opacity;
+      background: linear-gradient(135deg, #11141b 0%, #0a0d13 100%);
+      -webkit-user-drag: none;        /* 4-Round: suppress native drag ghost */
+      user-drag: none;
+      -webkit-touch-callout: none;
+      pointer-events: auto;
+    }
+    .card img.is-loaded { filter: blur(0); }
+
+    .card .ph {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, #11141b 0%, #0a0d13 100%);
+    }
+
+    /* ── Cinema mode (ТЗ §7) ─────────────────────────────────────────── */
+    .cinema {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(5, 7, 13, 0);
+      opacity: 0;
+      pointer-events: none;
+      transition: background var(--t-slow) var(--easing),
+                  opacity var(--t-slow) var(--easing);
+    }
+    .cinema.is-open {
+      background: rgba(5, 7, 13, 0.96);
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .cinema-stage {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .cinema-img {
+      max-width: 92vw;
+      max-height: 86vh;
+      object-fit: contain;
+      border-radius: 8px;
+      transform: translate(0, 0) scale(1);
+      transform-origin: center center;
+      transition: opacity var(--t-fast) ease;
+      will-change: transform, opacity;
+      cursor: zoom-in;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.7);
+      -webkit-user-drag: none;        /* 4-Round: suppress native drag ghost */
+      user-drag: none;
+      -webkit-touch-callout: none;
+    }
+    .cinema-img.is-fading { opacity: 0; }
+    .cinema-img.is-actual { object-fit: none; max-width: none; max-height: none; cursor: zoom-out; }
+
+    /* Cinema nav buttons */
+    .cinema-btn {
+      position: absolute;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      cursor: pointer;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: background 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+      opacity: 0.85;
+    }
+    .cinema-btn:hover { background: rgba(255, 255, 255, 0.12); transform: scale(1.06); opacity: 1; }
+    .cinema-btn:active { transform: scale(0.95); }
+    .cinema-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .cinema-btn svg { width: 22px; height: 22px; }
+
+    .cinema-close {
+      top: 24px;
+      right: 24px;
+      z-index: 2;
+    }
+    .cinema-prev {
+      left: 24px;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 3;                    /* 4-Round Bug-1 root cause: prev/next
+                                        must paint ABOVE .cinema-img, whose
+                                        transform creates a stacking context
+                                        that otherwise covers the buttons. */
+    }
+    .cinema-prev:hover { transform: translateY(-50%) scale(1.06); }
+    .cinema-prev:active { transform: translateY(-50%) scale(0.95); }
+    .cinema-next {
+      right: 24px;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 3;                    /* 4-Round Bug-1 root cause: see above */
+    }
+    .cinema-next:hover { transform: translateY(-50%) scale(1.06); }
+    .cinema-next:active { transform: translateY(-50%) scale(0.95); }
+
+    .cinema-toolbar {
+      position: absolute;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 10px;
+      background: rgba(13, 17, 26, 0.7);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: var(--shadow-card);
+      z-index: 2;
+    }
+    .cinema-toolbar .cinema-btn {
+      position: static;
+      transform: none;
+      width: 36px;
+      height: 36px;
+    }
+    .cinema-toolbar .cinema-btn:hover { transform: scale(1.06); }
+    .cinema-toolbar .cinema-btn:active { transform: scale(0.95); }
+    .cinema-toolbar .zoom-label {
+      min-width: 44px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.04em;
+      user-select: none;
+    }
+    .cinema-toolbar .divider {
+      width: 1px;
+      height: 20px;
+      background: var(--border);
+      margin: 0 4px;
+    }
+
+    .cinema-counter {
+      position: absolute;
+      bottom: 28px;
+      right: 28px;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.04em;
+      padding: 6px 12px;
+      background: rgba(13, 17, 26, 0.7);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      z-index: 2;
+    }
+
+    /* Reduce motion */
+    @media (prefers-reduced-motion: reduce) {
+      .cinema, .cinema-img, .card, .card img, .search-bar { transition: none !important; }
+    }
+
+    /* ── Settings (Round 0) ───────────────────────────────────────────── */
+
+    /* ⚙ button — top-right, glass pill, 32px, matches the search bar. */
+    .settings-btn {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      width: 40px;
+      height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-glass);
+      backdrop-filter: blur(20px) saturate(140%);
+      -webkit-backdrop-filter: blur(20px) saturate(140%);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      color: var(--text);
+      cursor: pointer;
+      z-index: 50;
+      transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .settings-btn:hover { background: rgba(255,255,255,0.08); transform: rotate(45deg); }
+    .settings-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .settings-btn svg { width: 20px; height: 20px; }
+
+    /* Backdrop. Click outside to close. */
+    .settings-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      z-index: 80;
+    }
+    .settings-backdrop.is-open { opacity: 1; pointer-events: auto; }
+
+    .settings-modal {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      width: min(92vw, 480px);
+      max-height: 86vh;
+      overflow-y: auto;
+      transform: translate(-50%, -48%) scale(0.97);
+      opacity: 0;
+      pointer-events: none;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow: var(--shadow-deep);
+      padding: 24px 24px 20px;
+      z-index: 90;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+    .settings-modal.is-open { opacity: 1; transform: translate(-50%, -50%) scale(1); pointer-events: auto; }
+
+    .settings-modal h2 {
+      margin: 0 0 18px;
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+
+    .settings-section { margin-bottom: 20px; }
+    .settings-section:last-child { margin-bottom: 0; }
+
+    .settings-label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .settings-hint {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+
+    .drop-zone {
+      border: 1.5px dashed var(--border);
+      border-radius: 14px;
+      padding: 24px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s ease, background 0.2s ease;
+      color: var(--text-muted);
+    }
+    .drop-zone:hover, .drop-zone.is-drag {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--text);
+    }
+    .drop-zone svg { width: 28px; height: 28px; margin-bottom: 8px; opacity: 0.85; }
+    .drop-zone .pick-row { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; }
+    .drop-zone .pick-row b { color: var(--text); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; }
+    .drop-zone .limits { font-size: 11px; margin-top: 6px; }
+
+    .file-list {
+      margin-top: 10px;
+      max-height: 120px;
+      overflow-y: auto;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .file-list .file-row {
+      display: flex; justify-content: space-between; gap: 8px;
+      padding: 3px 0;
+    }
+    .file-list .file-row .name {
+      flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .file-list .file-row .bytes { color: var(--text-muted); opacity: 0.7; }
+
+    .settings-input,
+    .settings-select {
+      width: 100%;
+      height: 40px;
+      padding: 0 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .settings-input:focus, .settings-select:focus {
+      border-color: rgba(124, 77, 255, 0.5);
+      box-shadow: 0 0 0 3px rgba(124, 77, 255, 0.18);
+    }
+    .settings-input[type=range] { padding: 0; height: 36px; background: transparent; }
+    .k-row { display: grid; grid-template-columns: 1fr 64px; gap: 12px; align-items: center; }
+    .k-row input[type=range] { width: 100%; accent-color: var(--accent); }
+    .k-row .k-num { text-align: center; font-variant-numeric: tabular-nums; }
+
+    .settings-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 22px;
+    }
+    .btn {
+      height: 36px;
+      padding: 0 16px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+    }
+    .btn:hover { background: rgba(255, 255, 255, 0.08); }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .btn-primary:hover { background: #8A5CFF; border-color: #8A5CFF; }
+    .btn-primary:disabled { background: rgba(124, 77, 255, 0.35); border-color: transparent; cursor: not-allowed; }
+    .btn-danger {
+      background: rgba(220, 53, 69, 0.15);
+      border-color: rgba(220, 53, 69, 0.3);
+      color: #ff6b6b;
+    }
+    .btn-danger:hover { background: rgba(220, 53, 69, 0.3); border-color: rgba(220, 53, 69, 0.5); }
+    .btn-danger-sm {
+      padding: 4px 12px;
+      font-size: 12px;
+      background: rgba(220, 53, 69, 0.15);
+      border-color: rgba(220, 53, 69, 0.3);
+      color: #ff6b6b;
+      border-radius: 6px;
+    }
+    .btn-danger-sm:hover { background: rgba(220, 53, 69, 0.4); }
+
+    .delete-modal { max-width: 640px; }
+    .delete-search-row { display: flex; gap: 8px; }
+    .delete-search-row .settings-input { flex: 1; }
+    .delete-results {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 10px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .delete-card {
+      position: relative;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: var(--card-bg);
+    }
+    .delete-card img {
+      width: 100%;
+      height: 100px;
+      object-fit: cover;
+      display: block;
+    }
+    .delete-card-info {
+      padding: 6px 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .delete-card-actions {
+      padding: 4px 8px 8px;
+      display: flex;
+      justify-content: center;
+    }
+
+    .upload-status {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 12px;
+      color: var(--text-muted);
+      min-height: 0;
+      transition: background 0.2s ease, border-color 0.2s ease;
+    }
+    .upload-status.is-ok { background: rgba(124, 200, 124, 0.10); border-color: rgba(124, 200, 124, 0.35); color: #d4ffd4; }
+    .upload-status.is-err { background: rgba(255, 90, 90, 0.10); border-color: rgba(255, 90, 90, 0.35); color: #ffd4d4; }
+    .upload-status .status-row { display: flex; justify-content: space-between; gap: 8px; }
+    .upload-status code { font-family: ui-monospace, SFMono-Regular, monospace; opacity: 0.85; }
+
+    @media (max-width: 480px) {
+      .settings-btn { top: 16px; right: 16px; width: 36px; height: 36px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <form id="searchForm" class="search-bar" method="post" action="/search" autocomplete="off" role="search">
+      <label for="q" class="visually-hidden" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Поисковый запрос</label>
+      <input
+        id="q"
+        name="q"
+        type="text"
+        value="{{ query|e }}"
+        placeholder="Поиск изображений…"
+        maxlength="512"
+        spellcheck="false"
+        aria-label="Поисковый запрос"
+        autofocus
+      >
+      <button class="search-btn" type="submit" aria-label="Искать">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"></circle>
+          <line x1="21" y1="21" x2="16.5" y2="16.5"></line>
+        </svg>
+      </button>
+    </form>
+
+    <section id="grid" class="grid is-ready" aria-label="Результаты поиска">
+      {% for r in results %}
+        <article class="card" data-idx="{{ loop.index0 }}" data-pos="{{ loop.index0 }}" tabindex="0" aria-label="Изображение {{ loop.index }}">
+          <div class="ph"></div>
+          <img src="{{ r.image_url }}" alt="" loading="lazy" decoding="async" draggable="false">
+        </article>
+      {% endfor %}
+    </section>
+  </main>
+
+  <!-- Cinema mode (ТЗ §7) -->
+  <div id="cinema" class="cinema" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Просмотр изображения">
+    <button class="cinema-btn cinema-close" type="button" aria-label="Закрыть">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <button class="cinema-btn cinema-prev" type="button" aria-label="Предыдущее изображение">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <button class="cinema-btn cinema-next" type="button" aria-label="Следующее изображение">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <div class="cinema-stage">
+      <img id="cinemaImg" class="cinema-img" alt="" draggable="false">
+    </div>
+    <div class="cinema-toolbar" role="toolbar" aria-label="Управление изображением">
+      <button class="cinema-btn zoom-out" type="button" aria-label="Отдалить">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+      </button>
+      <button class="cinema-btn zoom-reset" type="button" aria-label="Сброс масштаба">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+      </button>
+      <span class="zoom-label" id="zoomLabel">100%</span>
+      <button class="cinema-btn zoom-in" type="button" aria-label="Приблизить">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14M12 5v14"/></svg>
+      </button>
+      <div class="divider" aria-hidden="true"></div>
+      <button class="cinema-btn fit-toggle" type="button" aria-label="Вместить или реальный размер">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      </button>
+    </div>
+    <div class="cinema-counter" id="cinemaCounter" aria-live="polite"></div>
+  </div>
+
+  <!-- Settings button + modal (Round 0) -->
+  <button id="settingsBtn" class="settings-btn" type="button" aria-label="Настройки" aria-haspopup="dialog" aria-controls="settingsModal" aria-expanded="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06A2 2 0 1 1 4.31 16.96l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.29l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+    </svg>
+  </button>
+  <!-- A25/A52 fix: server-rendered limits consumed by JS via data attributes. -->
+  <script>
+    (function () {
+      var root = document.getElementById('settingsModal');
+      if (!root) return;
+      root.dataset.maxFiles = '{{ max_files }}';
+      root.dataset.maxBytes = '{{ max_bytes }}';
+      root.dataset.maxK     = '{{ max_k }}';
+      root.dataset.defaultK = '{{ default_k }}';
+    })();
+  </script>
+
+  <div id="settingsBackdrop" class="settings-backdrop" aria-hidden="true"></div>
+
+  <div id="settingsModal" class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" aria-hidden="true">
+    <h2 id="settingsTitle">Настройки</h2>
+
+    <section class="settings-section">
+      <span class="settings-label">Загрузить изображения</span>
+      <div id="dropZone" class="drop-zone" tabindex="0" role="button" aria-label="Выбрать файлы">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline>
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+        <div class="pick-row">Перетащите файлы сюда или <b>выберите вручную</b></div>
+        <div id="dropLimits" class="limits">до {{ max_files }} файлов, до {{ max_bytes // (1024*1024) }} MB за раз</div>
+        <input id="fileInput" type="file" accept="image/*" multiple hidden>
+      </div>
+      <div id="fileList" class="file-list" aria-live="polite"></div>
+      <div class="settings-actions" style="margin-top: 12px;">
+        <button id="clearFilesBtn" class="btn" type="button" style="display:none">Очистить</button>
+        <button id="uploadBtn" class="btn btn-primary" type="button" disabled>Загрузить</button>
+        <button id="deleteModeBtn" class="btn btn-danger" type="button">Выбрать и удалить</button>
+      </div>
+      <div id="uploadStatus" class="upload-status" hidden></div>
+    </section>
+
+    <section class="settings-section">
+      <label class="settings-label" for="kInput">Изображений в выдаче</label>
+      <div class="k-row">
+        <input id="kRange" type="range" min="1" max="{{ max_k }}" value="{{ default_k }}">
+        <input id="kInput" class="settings-input k-num" type="number" min="1" max="{{ max_k }}" value="{{ default_k }}">
+      </div>
+      <div class="settings-hint">От 1 до {{ max_k }}. Сохраняется в этом браузере.</div>
+    </section>
+
+    <div class="settings-actions">
+      <button id="closeSettingsBtn" class="btn" type="button">Готово</button>
+    </div>
+  </div>
+
+  <!-- Delete modal -->
+  <div id="deleteBackdrop" class="settings-backdrop" aria-hidden="true"></div>
+  <div id="deleteModal" class="settings-modal delete-modal" role="dialog" aria-modal="true" aria-labelledby="deleteTitle" aria-hidden="true">
+    <h2 id="deleteTitle">Удалить изображения</h2>
+    <section class="settings-section">
+      <label class="settings-label" for="deleteSearch">Поиск по базе</label>
+      <div class="delete-search-row">
+        <input id="deleteSearch" class="settings-input" type="text" placeholder="Введите запрос..." autocomplete="off">
+        <button id="deleteSearchBtn" class="btn btn-primary" type="button">Найти</button>
+      </div>
+      <div id="deleteResults" class="delete-results" aria-live="polite"></div>
+      <div id="deleteStatus" class="upload-status" hidden></div>
+    </section>
+    <div class="settings-actions">
+      <button id="closeDeleteBtn" class="btn" type="button">Закрыть</button>
+    </div>
+  </div>
+
+  <script>
+    // Only results are passed to JS; the query string lives in the URL.
+    window.__INITIAL_RESULTS__ = {{ (results|tojson) if results is defined else '[]' }};
+  </script>
+  <script type="module" src="/static/app.js" defer></script>
+</body>
+</html>

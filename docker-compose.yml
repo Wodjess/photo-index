@@ -1,0 +1,49 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: photo-index-redis
+    restart: unless-stopped
+
+  web:
+    build: .
+    container_name: photo-index-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-7860}:7860"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - HF_HOME=/data/.cache
+      - WEB_PORT=7860
+      - RELOAD_POLL_S=5
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
+      - PHOTOINDEX_USER=${PHOTOINDEX_USER:-}
+      - PHOTOINDEX_PASS=${PHOTOINDEX_PASS:-}
+    volumes:
+      - ./data:/data
+    depends_on:
+      - redis
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+
+  worker:
+    build: .
+    container_name: photo-index-worker
+    restart: unless-stopped
+    command: python worker.py
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - HF_HOME=/data/.cache
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
+      - PHOTOINDEX_ROOT=/data
+    volumes:
+      - ./data:/data
+    depends_on:
+      - redis
+    deploy:
+      resources:
+        limits:
+          memory: 6G
