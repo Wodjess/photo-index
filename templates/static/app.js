@@ -725,7 +725,15 @@ form.addEventListener('submit', (e) => {
   } else {
     grid.classList.add('is-ready');
   }
-  setTimeout(() => { try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); } }, 50);
+  // Only auto-focus the search bar when the auth modal is not open.
+  // The auth IIFE owns the user input focus when auth is enabled, so
+  // we must not steal it back at boot.
+  const authOpen = window.__AUTH_ENABLED__ === 'true'
+    && document.getElementById('authModal')
+    && document.getElementById('authModal').classList.contains('is-open');
+  if (!authOpen) {
+    setTimeout(() => { try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); } }, 50);
+  }
 })();
 
 // ── Settings (Round 0) ─────────────────────────────────────────────────────
@@ -807,6 +815,11 @@ form.addEventListener('submit', (e) => {
   btn.addEventListener('click', open);
   closeBtn.addEventListener('click', close);
   backdrop.addEventListener('click', close);
+
+  // Listen for the cross-IIFE close signal (e.g. from the auth IIFE
+  // after a logout). Loosely coupled — auth owns the lifecycle, we
+  // just react.
+  window.addEventListener('photoindex:close-settings', close);
 
   // Keyboard: Escape closes, Tab is trapped.
   document.addEventListener('keydown', (e) => {
@@ -1166,4 +1179,240 @@ form.addEventListener('submit', (e) => {
   searchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') doSearch();
   });
+})();
+
+/* ── Auth modal ───────────────────────────────────────────────────
+   Single-user, no-registration. When auth is enabled server-side
+   (PHOTOINDEX_USER + PHOTOINDEX_PASS non-empty), the page boots
+   with a dimmed app shell and a login modal on top. The modal is
+   not dismissible until the user authenticates. After a successful
+   login the modal fades out and the shell becomes interactive. */
+(function authModal() {
+  // The template always emits the string 'true' or 'false' — the
+  // `=== true` arm would never fire; we keep the comparison simple.
+  const AUTH_ENABLED = window.__AUTH_ENABLED__ === 'true';
+  if (!AUTH_ENABLED) return;
+
+  const appShell  = document.getElementById('appShell');
+  const backdrop  = document.getElementById('authBackdrop');
+  const modal     = document.getElementById('authModal');
+  const form      = document.getElementById('authForm');
+  const userInput = document.getElementById('authUser');
+  const passInput = document.getElementById('authPass');
+  const submitBtn = document.getElementById('authSubmit');
+  const errorBox  = document.getElementById('authError');
+  const logoutBtn = document.getElementById('logoutBtn');
+
+  if (!appShell || !backdrop || !modal || !form) return;
+
+  let unlocking = false;
+  let lastUnlockAt = 0;
+  const FOCUS_RELAX_MS = 800;       // don't steal focus from typing in the modal
+  const FADE_MS = 300;               // matches .auth-modal transition (280ms + slack)
+  const BOOT_FOCUS_DELAY_MS = 50;    // let SSR layout settle before focus()
+  let savedBodyOverflow = null;
+
+  const SUBMIT_LABEL = 'Войти';
+  const SUBMIT_LOADING_LABEL = 'Вход…';
+
+  function setError(text) {
+    errorBox.textContent = text || '';
+  }
+  function setLoading(on) {
+    modal.classList.toggle('is-loading', !!on);
+    submitBtn.disabled = !!on;
+    userInput.disabled = !!on;
+    passInput.disabled = !!on;
+    if (on) {
+      submitBtn.textContent = SUBMIT_LOADING_LABEL;
+    } else {
+      submitBtn.textContent = SUBMIT_LABEL;
+    }
+  }
+  function lock({focus} = {focus: true}) {
+    appShell.setAttribute('data-locked', 'true');
+    // The HTML `inert` attribute is the modern, spec-blessed way to
+    // block both mouse and keyboard focus on a subtree. Supported in
+    // Chrome 102+, Firefox 112+, Safari 15.5+. Fall back to nothing
+    // on older browsers — they keep `pointer-events: none` blocking
+    // mouse, and keyboard-only users are a smaller slice of the
+    // self-hosted audience.
+    try { appShell.inert = true; } catch (_) {}
+    backdrop.style.zIndex = '85';
+    modal.style.zIndex = '110';
+    backdrop.classList.add('is-open');
+    backdrop.setAttribute('aria-hidden', 'false');
+    modal.classList.add('is-open');
+    modal.setAttribute('aria-hidden', 'false');
+    if (savedBodyOverflow === null) {
+      savedBodyOverflow = document.body.style.overflow;
+    }
+    document.body.style.overflow = 'hidden';
+    if (focus) {
+      // Don't yank focus if the user is already typing in the modal.
+      setTimeout(() => {
+        if (document.activeElement !== userInput && document.activeElement !== passInput) {
+          try { userInput.focus({ preventScroll: true }); } catch (_) { userInput.focus(); }
+        }
+      }, BOOT_FOCUS_DELAY_MS);
+    }
+  }
+  function unlock() {
+    appShell.setAttribute('data-locked', 'false');
+    try { appShell.inert = false; } catch (_) {}
+    backdrop.classList.remove('is-open');
+    backdrop.setAttribute('aria-hidden', 'true');
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+    if (savedBodyOverflow !== null) {
+      document.body.style.overflow = savedBodyOverflow;
+      savedBodyOverflow = null;
+    } else {
+      document.body.style.overflow = '';
+    }
+    setError('');
+    lastUnlockAt = Date.now();
+  }
+  // Same-origin helper for the global 401 interceptor — only re-lock on
+  // 401s from our own endpoints, never from a future cross-origin fetch.
+  function isSameOrigin(url) {
+    try {
+      const u = new URL(url, window.location.href);
+      return u.origin === window.location.origin;
+    } catch (_) {
+      return false;
+    }
+  }
+  function focusIfModalOpen() {
+    if (!modal.classList.contains('is-open')) return;
+    if (document.activeElement === userInput || document.activeElement === passInput) return;
+    try { userInput.focus({ preventScroll: true }); } catch (_) { userInput.focus(); }
+  }
+  async function refreshState() {
+    try {
+      const r = await fetch('/api/whoami', { credentials: 'same-origin', cache: 'no-store' });
+      if (r.ok) {
+        const j = await r.json().catch(() => ({}));
+        if (j && j.user) unlock();
+        else lock();
+      } else {
+        lock();
+      }
+    } catch (e) {
+      // Server unreachable on first load. The login attempt will surface
+      // its own network error; here we just hint that the server is down
+      // so the user is not staring at a modal with no explanation.
+      setError('Сервер недоступен. Повторите попытку позже.');
+    }
+  }
+  async function handleLogin(e) {
+    if (e) e.preventDefault();
+    if (unlocking) return;
+    setError('');
+    const u = userInput.value.trim();
+    const p = passInput.value;
+    if (!u || !p) { setError('Введите имя пользователя и пароль.'); return; }
+    setLoading(true);
+    try {
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ user: u, pass: p }),
+      });
+      if (r.ok) {
+        unlocking = true;
+        unlock();
+        passInput.value = '';
+        // Defer the reload long enough for the fade-out transition to
+        // run. Without this setTimeout the page would navigate before
+        // the user sees the planned smooth fade. The reload is still
+        // simpler than re-fetching all state (K_MAX, search index, etc.)
+        // and avoids subtle drift.
+        setTimeout(() => { try { window.location.reload(); } catch (_) {} }, FADE_MS);
+        return;
+      }
+      let detail = 'Не удалось войти.';
+      try { const j = await r.json(); if (j && j.detail) detail = j.detail; } catch (_) {}
+      setError(detail);
+      passInput.focus();
+      passInput.select();
+    } catch (e) {
+      setError('Ошибка сети: ' + (e && e.message ? e.message : e));
+    } finally {
+      // setLoading(false) is only reached on failure (the success path
+      // navigates away). Restore the label so a subsequent attempt
+      // starts in a clean state.
+      setTimeout(() => setLoading(false), 0);
+    }
+  }
+  async function handleLogout() {
+    setError('');
+    try {
+      await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+    } catch (_) {}
+    userInput.value = '';
+    passInput.value = '';
+    lock();
+    // Decoupled signal to the settings IIFE — it owns the ⚙ menu and
+    // should be the one to close it. Dispatching a custom event keeps
+    // the two IIFEs loosely coupled; the catch is for the (currently
+    // impossible) case where no listener is registered.
+    try {
+      window.dispatchEvent(new CustomEvent('photoindex:close-settings'));
+    } catch (_) {}
+  }
+
+  form.addEventListener('submit', handleLogin);
+  if (logoutBtn) logoutBtn.addEventListener('click', handleLogout);
+
+  // Block the Escape / backdrop click from dismissing the modal — the user
+  // must authenticate to enter. The modal is intentionally sticky.
+  // (No event handlers needed; we simply do not bind close-on-escape /
+  // close-on-backdrop for this modal.)
+
+  // Tab focus trap: keep focus inside the auth modal while it is open.
+  // Without this, Tab can walk into the dimmed search bar / settings
+  // button (A2 mitigation blocks mouse, but keyboard focus is governed
+  // by the focus order, not pointer-events).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    if (!modal.classList.contains('is-open')) return;
+    const focusables = [userInput, passInput, submitBtn].filter((el) => el && !el.disabled);
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last  = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !modal.contains(active)) { e.preventDefault(); last.focus(); }
+    } else {
+      if (active === last || !modal.contains(active))  { e.preventDefault(); first.focus(); }
+    }
+  });
+
+  // Global 401 interceptor: any auth-protected endpoint returning 401
+  // re-shows the modal. Lets the frontend react to expired sessions
+  // without a page reload.
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    return _origFetch(input, init).then((resp) => {
+      try {
+        const url = (typeof input === 'string') ? input : (input && input.url) || '';
+        if (resp.status === 401
+            && url.indexOf('/api/login') === -1
+            && url.indexOf('/api/whoami') === -1
+            && isSameOrigin(url)
+            && (Date.now() - lastUnlockAt) > FOCUS_RELAX_MS) {
+          lock();
+          focusIfModalOpen();
+        }
+      } catch (_) {}
+      return resp;
+    });
+  };
+
+  // Boot: ask the server who we are. The shell is already unlocked by
+  // SSR if the user has a valid cookie (so no flicker for already-
+  // logged-in users); we just confirm.
+  refreshState();
 })();

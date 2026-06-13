@@ -27,7 +27,7 @@ Open http://localhost:7860
 
 The first run downloads the embedding model (about 2 GB) and the OCR language data. After that, restarts are fast.
 
-To enable image uploads, set `PHOTOINDEX_USER` and `PHOTOINDEX_PASS` in `.env` and restart. Without auth, the search and viewer still work, but uploads and deletes return 503.
+On first open you will see a login screen. The default credentials are `admin` / `admin`. To change them, edit `.env` and restart. To disable auth entirely, set `PHOTOINDEX_USER=` and `PHOTOINDEX_PASS=` to empty strings in `.env` and restart (the login screen goes away and all endpoints become public).
 
 To stop and clean up:
 
@@ -124,9 +124,12 @@ All settings are environment variables. Sensible defaults are baked in.
 |----------------------|------------------------|----------------------------------------|
 | `WEB_PORT`           | `7860`                 | Port the web UI listens on             |
 | `REDIS_URL`          | `redis://127.0.0.1:6379/0` | Redis connection string           |
-| `PHOTOINDEX_ROOT`    | script directory       | Where `data/` lives                    |
-| `PHOTOINDEX_USER`    | empty                  | Username for upload/delete auth        |
-| `PHOTOINDEX_PASS`    | empty                  | Password for upload/delete auth        |
+| `PHOTOINDEX_ROOT`    | script directory       | Where the data directory's parent is   |
+| `PHOTOINDEX_DATA`    | `$PHOTOINDEX_ROOT/data` | Override the data directory location  |
+| `PHOTOINDEX_USER`    | `admin`                | Username for login                     |
+| `PHOTOINDEX_PASS`    | `admin`                | Password for login (set both to empty to disable auth) |
+| `PHOTOINDEX_SESSION_TTL_DAYS` | `7`           | How long the session cookie lasts      |
+| `PHOTOINDEX_SESSION_SECURE`  | `0`           | Set to `1` to mark the cookie Secure   |
 | `MAX_UPLOAD_FILES`   | `300`                  | Max images per upload                  |
 | `MAX_UPLOAD_BYTES`   | `209715200`            | Max bytes per upload (200 MB)          |
 | `MAX_TOP_K`          | `25`                   | Max results per search                 |
@@ -139,6 +142,19 @@ All settings are environment variables. Sensible defaults are baked in.
 ## Search quality
 
 The hybrid score combines a dense vector similarity (cosine) and a sparse BM25 score. The combination is done with Reciprocal Rank Fusion. In practice this means exact words in your query still help, but you do not need to use the exact words that appear in the image. Russian and English are both supported by the default model.
+
+## Authentication
+
+There is exactly one user, no registration, and no way to add more accounts. The default credentials are `admin` / `admin`. Both search and upload are gated behind a login modal that appears on page load.
+
+* To change the password, set `PHOTOINDEX_USER` and `PHOTOINDEX_PASS` in `.env` and restart. The username is fixed at `admin`.
+* To disable auth entirely (public, no login screen), set both env vars to empty strings and restart.
+* The session is an HttpOnly cookie signed with HMAC-SHA256. It expires after 7 days (configurable via `PHOTOINDEX_SESSION_TTL_DAYS`).
+* The signing key is stored at `data/.session_key` (mode 600). Back this file up if you want to preserve sessions across container recreates; deleting it logs everyone out.
+* For direct API access (e.g. uploading via `curl`), HTTP Basic auth with the same `admin` / `admin` credentials also works.
+* Behind HTTPS, set `PHOTOINDEX_SESSION_SECURE=1` so the cookie is marked Secure and not sent over plain HTTP.
+
+**Important:** change the default `admin` / `admin` password before exposing the app to anyone else.
 
 ## Limitations
 

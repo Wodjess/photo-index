@@ -4,18 +4,20 @@ Bound to 0.0.0.0:7860 by default (see WEB_HOST / WEB_PORT env vars).
 SSR via Jinja2 for the initial paint; the front-end then drives
 /api/search from JS so the 5-card grid + cinema mode feel instant.
 
-Round 0 (settings+upload):
-  - POST /api/upload  (multipart, up to 300 files / 200 MB)
-  - GET  /api/upload/{job_id}  (job status from Redis hash)
-  - GET  /api/health  (liveness + queue depth + indexed count)
-  - /api/search accepts `k` 1..MAX_TOP_K (default MAX_TOP_K, capped
-    server-side).
-  - Background asyncio task polls data/index/.reload mtime and calls
-    ensure_loaded() on change.
+Auth (single user, no registration):
+  - Defaults: PHOTOINDEX_USER=admin, PHOTOINDEX_PASS=admin.
+  - Set both to "" to disable auth entirely (legacy behaviour).
+  - Frontend gates both search and upload behind a login modal that
+    verifies the session cookie set by /api/login.
+  - Direct API consumers can still use HTTP Basic auth.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import time
 from pathlib import Path
@@ -48,6 +50,10 @@ from config import (
     RELOAD_POLL_S,
     RELOAD_SENTINEL,
     DEFAULT_TOP_K,
+    SESSION_COOKIE_NAME,
+    SESSION_COOKIE_SECURE,
+    SESSION_KEY,
+    SESSION_TTL_DAYS,
 )
 import search as search_mod
 import tasks
@@ -167,45 +173,115 @@ async def _shut_down() -> None:
 
 
 # ── auth ────────────────────────────────────────────────────────────────────
-def _require_auth(request: Request) -> None:
-    """HTTP basic auth via Authorization header.
+AUTH_ENABLED = bool(BASIC_AUTH_USER) and bool(BASIC_AUTH_PASS)
 
-    Configured via PHOTOINDEX_USER + PHOTOINDEX_PASS env vars.
 
-    A2 fix: previously, when the env vars were unset, this function
-    silently returned (no auth) — which matched the plan's "auth is
-    OFF by default" decision, but the code comment in config.py
-    claimed the endpoint would 503. The behavior was correct, the
-    docs were wrong. The default-off decision is preserved for
-    *reads*; writes (POST /api/upload) now always require auth, with
-    a 503 if env is unset (so an operator who hasn't configured auth
-    is forced to opt-in rather than accidentally exposing writes).
-    """
-    if not (BASIC_AUTH_USER and BASIC_AUTH_PASS):
-        # Write paths enforce: deny if auth is unconfigured. Read paths
-        # (caller should skip this check) opt out via _require_auth_opt.
-        if request.url.path.startswith("/api/upload"):
-            raise HTTPException(
-                503,
-                "auth not configured: set PHOTOINDEX_USER and PHOTOINDEX_PASS in "
-                "set PHOTOINDEX_USER and PHOTOINDEX_PASS environment variables to enable uploads",
-                headers={"WWW-Authenticate": "Basic"},
-            )
-        return
-    import base64
-    h = request.headers.get("Authorization", "")
-    if not h.startswith("Basic "):
-        raise HTTPException(401, "auth required", headers={"WWW-Authenticate": "Basic"})
+def _b64u_encode(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def _b64u_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def _issue_session_cookie(user: str) -> tuple[str, int]:
+    """Build a signed session token. Returns (cookie_value, expires_at_epoch)."""
+    expires = int(time.time()) + SESSION_TTL_DAYS * 86400
+    payload = json.dumps({"u": user, "exp": expires}, separators=(",", ":")).encode("utf-8")
+    payload_b64 = _b64u_encode(payload)
+    sig = hmac.new(SESSION_KEY, payload_b64.encode("ascii"), hashlib.sha256).digest()
+    return f"{payload_b64}.{_b64u_encode(sig)}", expires
+
+
+def _verify_session_cookie(token: str) -> str | None:
+    """Return the username if the token is valid and unexpired, else None."""
+    if not token or "." not in token:
+        return None
+    payload_b64, _, sig_b64 = token.partition(".")
     try:
-        decoded = base64.b64decode(h.split(" ", 1)[1], validate=True).decode("utf-8", "replace")
+        expected_sig = hmac.new(SESSION_KEY, payload_b64.encode("ascii"), hashlib.sha256).digest()
+        actual_sig = _b64u_decode(sig_b64)
     except Exception:
-        raise HTTPException(401, "bad auth", headers={"WWW-Authenticate": "Basic"})
-    if ":" not in decoded:
-        raise HTTPException(401, "bad auth", headers={"WWW-Authenticate": "Basic"})
-    user, _, pwd = decoded.partition(":")
-    import hmac
-    if not hmac.compare_digest(user, BASIC_AUTH_USER) or not hmac.compare_digest(pwd, BASIC_AUTH_PASS):
-        raise HTTPException(401, "bad creds", headers={"WWW-Authenticate": "Basic"})
+        return None
+    if not hmac.compare_digest(expected_sig, actual_sig):
+        return None
+    try:
+        payload = json.loads(_b64u_decode(payload_b64).decode("utf-8"))
+    except Exception:
+        return None
+    if int(payload.get("exp", 0)) < int(time.time()):
+        return None
+    user = payload.get("u")
+    if not isinstance(user, str) or not user:
+        return None
+    # Defense-in-depth: never trust a payload field outside of what the
+    # current auth config declares as valid. The HMAC already prevents
+    # forgery, so this is a guardrail for any future multi-user reuse
+    # of the signing key.
+    if not hmac.compare_digest(user, BASIC_AUTH_USER):
+        return None
+    return user
+
+
+def _set_session_cookie(response: JSONResponse, user: str) -> None:
+    value, expires = _issue_session_cookie(user)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=value,
+        max_age=SESSION_TTL_DAYS * 86400,
+        expires=expires,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=SESSION_COOKIE_SECURE,
+    )
+
+
+def _clear_session_cookie(response: JSONResponse) -> None:
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        secure=SESSION_COOKIE_SECURE,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _require_auth(request: Request) -> str | None:
+    """Authenticate the request. Returns the username or raises 401.
+
+    Auth sources, in order:
+      1. The signed HttpOnly session cookie set by /api/login.
+      2. HTTP Basic auth header (for direct API consumers and scripts).
+    Returns None immediately if auth is disabled (one or both env vars
+    empty). To re-enable the original "no auth, no problem" behaviour
+    (uploads public), set both PHOTOINDEX_USER and PHOTOINDEX_PASS to "".
+    """
+    if not AUTH_ENABLED:
+        return None
+
+    # 1) Cookie auth (browser modal flow).
+    cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie:
+        user = _verify_session_cookie(cookie)
+        if user is not None:
+            return user
+        # Bad cookie — fall through to basic, then 401 below.
+
+    # 2) HTTP Basic auth (curl, scripts, direct API consumers).
+    h = request.headers.get("Authorization", "")
+    if h.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(h.split(" ", 1)[1]).decode("utf-8", "replace")
+        except Exception:
+            decoded = ""
+        if ":" in decoded:
+            user, _, pwd = decoded.partition(":")
+            if hmac.compare_digest(user, BASIC_AUTH_USER) and hmac.compare_digest(pwd, BASIC_AUTH_PASS):
+                return user
+
+    raise HTTPException(401, "auth required", headers={"WWW-Authenticate": "Basic"})
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -237,6 +313,13 @@ def _do_search(query: str, top_k: int) -> list[dict]:
 
 
 # ── routes ──────────────────────────────────────────────────────────────────
+def _is_authed(request: Request) -> bool:
+    """Return True if the request carries a valid session cookie."""
+    if not AUTH_ENABLED:
+        return False
+    return _verify_session_cookie(request.cookies.get(SESSION_COOKIE_NAME) or "") is not None
+
+
 @app.get("/", response_class=HTMLResponse)
 def root(request: Request):
     return _TEMPLATES.TemplateResponse(
@@ -249,6 +332,8 @@ def root(request: Request):
             "max_k": MAX_TOP_K,
             "max_files": MAX_UPLOAD_FILES,
             "max_bytes": MAX_UPLOAD_BYTES,
+            "auth_enabled": AUTH_ENABLED,
+            "authed": _is_authed(request),
         },
     )
 
@@ -259,6 +344,7 @@ def search_post(
     q: str = Form("", max_length=512),
     k: int = Form(DEFAULT_TOP_K, ge=1, le=MAX_TOP_K),
 ):
+    _require_auth(request)
     results = _do_search(q, top_k=k)
     return _TEMPLATES.TemplateResponse(
         "index.html",
@@ -270,16 +356,90 @@ def search_post(
             "max_k": MAX_TOP_K,
             "max_files": MAX_UPLOAD_FILES,
             "max_bytes": MAX_UPLOAD_BYTES,
+            "auth_enabled": AUTH_ENABLED,
+            "authed": _is_authed(request),
         },
     )
 
 
 @app.get("/api/search")
 def api_search(
+    request: Request,
     q: str = Query(..., min_length=1, max_length=512),
     k: int = Query(DEFAULT_TOP_K, ge=1, le=MAX_TOP_K),
 ):
+    _require_auth(request)
     return {"query": q, "results": _do_search(q, k)}
+
+
+# ── auth endpoints ──────────────────────────────────────────────────────────
+@app.post("/api/login")
+async def api_login(request: Request):
+    """Verify username + password, then set the session cookie.
+
+    The frontend never sees the cookie value directly (it is HttpOnly);
+    it only needs the 200 vs 401 response to know it can unlock the UI.
+    """
+    if not AUTH_ENABLED:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "auth is disabled on this server"},
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"detail": "expected JSON body"})
+    user = body.get("user", "")
+    pwd = body.get("pass", "")
+    if not isinstance(user, str) or not isinstance(pwd, str):
+        return JSONResponse(status_code=400, content={"detail": "user and pass must be strings"})
+    if not (hmac.compare_digest(user, BASIC_AUTH_USER) and hmac.compare_digest(pwd, BASIC_AUTH_PASS)):
+        # Identical message for unknown user vs wrong password to avoid
+        # user-enumeration leaks. We do log the attempt so the operator
+        # can spot brute-force scans after the fact.
+        client = request.client
+        log.warning("auth: failed login for user=%r from %s", user, client.host if client else "?")
+        return JSONResponse(status_code=401, content={"detail": "bad creds"})
+    resp = JSONResponse(content={"user": user, "ok": True})
+    _set_session_cookie(resp, user)
+    log.info("auth: login ok user=%r from %s", user, request.client.host if request.client else "?")
+    return resp
+
+
+@app.post("/api/logout")
+async def api_logout():
+    """Clear the session cookie. Idempotent — works even if no cookie was set."""
+    resp = JSONResponse(content={"ok": True})
+    _clear_session_cookie(resp)
+    return resp
+
+
+@app.get("/api/whoami")
+def api_whoami(request: Request):
+    """Return the current user if a valid session cookie is present.
+
+    Always returns 401 when auth is enabled and the caller is not signed
+    in. When auth is disabled, returns 200 with `auth_enabled: false`
+    so the frontend can skip showing the modal.
+    """
+    if not AUTH_ENABLED:
+        return {"auth_enabled": False, "user": None}
+    cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    user = _verify_session_cookie(cookie or "")
+    if not user:
+        raise HTTPException(401, "auth required")
+    # Decode the exp to surface a friendly hint to the UI.
+    exp = 0
+    if cookie:
+        try:
+            payload_b64 = cookie.split(".", 1)[0]
+            payload = json.loads(_b64u_decode(payload_b64).decode("utf-8"))
+            exp = int(payload.get("exp", 0))
+        except Exception:
+            exp = 0
+    return {"auth_enabled": True, "user": user, "expires_at": exp}
 
 
 @app.get("/api/health")
