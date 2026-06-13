@@ -27,7 +27,7 @@ Open http://localhost:7860
 
 The first run downloads the embedding model (about 2 GB) and the OCR language data. After that, restarts are fast.
 
-On first open you will see a login screen. The default credentials are `admin` / `admin`. To change them, edit `.env` and restart. To disable auth entirely, set `PHOTOINDEX_USER=` and `PHOTOINDEX_PASS=` to empty strings in `.env` and restart (the login screen goes away and all endpoints become public).
+A login screen appears on first open. Enter `admin` / `admin` to proceed. To change the password or disable auth, edit `.env` and restart (see [Authentication](#authentication) below).
 
 To stop and clean up:
 
@@ -96,6 +96,7 @@ Web process (FastAPI):
 * Accepts uploads at `POST /api/upload`.
 * Exposes `GET /api/search?q=...&k=...` for the frontend.
 * Exposes `DELETE /api/image/{name}` for removing images.
+* Exposes `POST /api/login`, `POST /api/logout`, `GET /api/whoami` for auth.
 * Polls a sentinel file every few seconds and reloads the in-memory index when the worker finishes a job.
 
 Worker process (standalone):
@@ -114,6 +115,7 @@ data/
   index/          # faiss.index, bm25.pkl, manifest.json, embeddings.npy
   staging/        # in-flight upload chunks
   .cache/         # Hugging Face model weights
+  .session_key    # HMAC-SHA256 signing key for auth cookies (mode 600)
 ```
 
 ## Configuration
@@ -126,10 +128,10 @@ All settings are environment variables. Sensible defaults are baked in.
 | `REDIS_URL`          | `redis://127.0.0.1:6379/0` | Redis connection string           |
 | `PHOTOINDEX_ROOT`    | script directory       | Where the data directory's parent is   |
 | `PHOTOINDEX_DATA`    | `$PHOTOINDEX_ROOT/data` | Override the data directory location  |
-| `PHOTOINDEX_USER`    | `admin`                | Username for login                     |
+| `PHOTOINDEX_USER`    | `admin`                | Username for login (always `admin`)    |
 | `PHOTOINDEX_PASS`    | `admin`                | Password for login (set both to empty to disable auth) |
 | `PHOTOINDEX_SESSION_TTL_DAYS` | `7`           | How long the session cookie lasts      |
-| `PHOTOINDEX_SESSION_SECURE`  | `0`           | Set to `1` to mark the cookie Secure   |
+| `PHOTOINDEX_SESSION_SECURE`  | `0`           | Set to `1` to mark the cookie Secure (HTTPS) |
 | `MAX_UPLOAD_FILES`   | `300`                  | Max images per upload                  |
 | `MAX_UPLOAD_BYTES`   | `209715200`            | Max bytes per upload (200 MB)          |
 | `MAX_TOP_K`          | `25`                   | Max results per search                 |
@@ -145,16 +147,73 @@ The hybrid score combines a dense vector similarity (cosine) and a sparse BM25 s
 
 ## Authentication
 
-There is exactly one user, no registration, and no way to add more accounts. The default credentials are `admin` / `admin`. Both search and upload are gated behind a login modal that appears on page load.
+Photo Index has a single-user auth system. There is exactly one account (`admin`), no registration, and no way to add more users. By default, auth is **enabled** with credentials `admin` / `admin`.
 
-* To change the password, set `PHOTOINDEX_USER` and `PHOTOINDEX_PASS` in `.env` and restart. The username is fixed at `admin`.
-* To disable auth entirely (public, no login screen), set both env vars to empty strings and restart.
-* The session is an HttpOnly cookie signed with HMAC-SHA256. It expires after 7 days (configurable via `PHOTOINDEX_SESSION_TTL_DAYS`).
-* The signing key is stored at `data/.session_key` (mode 600). Back this file up if you want to preserve sessions across container recreates; deleting it logs everyone out.
-* For direct API access (e.g. uploading via `curl`), HTTP Basic auth with the same `admin` / `admin` credentials also works.
-* Behind HTTPS, set `PHOTOINDEX_SESSION_SECURE=1` so the cookie is marked Secure and not sent over plain HTTP.
+### How it works
 
-**Important:** change the default `admin` / `admin` password before exposing the app to anyone else.
+On first visit, a login modal appears over the dimmed search interface. The modal blocks all interaction (search, upload, settings) until valid credentials are entered. After login the modal fades out and the app becomes interactive. The session is stored in an HttpOnly cookie (`photoindex_session`) signed with HMAC-SHA256. The cookie expires after 7 days (configurable).
+
+The signing key is a 32-byte random secret stored at `data/.session_key` (mode 600). It is created automatically on first start. Deleting this file logs out all sessions. Back it up if you want sessions to survive container recreates.
+
+### Changing the password
+
+Edit `.env` and restart:
+
+```bash
+PHOTOINDEX_USER=admin
+PHOTOINDEX_PASS=your-new-password
+```
+
+The username is always `admin`. Only the password can be changed.
+
+### Disabling auth
+
+Set both variables to empty strings in `.env` and restart:
+
+```bash
+PHOTOINDEX_USER=
+PHOTOINDEX_PASS=
+```
+
+The login modal disappears and all endpoints become public. Use this for local-only setups or when you have your own reverse-proxy auth in front.
+
+### API access (curl, scripts)
+
+HTTP Basic auth works for all API endpoints. Example upload:
+
+```bash
+curl -u admin:admin -F "files=@photo.jpg" https://your-domain/api/upload
+```
+
+Example search:
+
+```bash
+curl -u admin:admin "https://your-domain/api/search?q=cat&k=5"
+```
+
+### HTTPS and secure cookies
+
+Behind HTTPS (nginx, Caddy, etc.), set in `.env`:
+
+```bash
+PHOTOINDEX_SESSION_SECURE=1
+```
+
+This marks the cookie `Secure` so browsers only send it over HTTPS. Leave at `0` for local development over plain HTTP.
+
+### Session lifetime
+
+Default is 7 days. Override with:
+
+```bash
+PHOTOINDEX_SESSION_TTL_DAYS=14
+```
+
+After expiry the user must log in again.
+
+### Important
+
+Change the default `admin` / `admin` password before exposing the app to anyone else. There is no rate limit on the login endpoint, so a weak password on a public host is easily brute-forced.
 
 ## Limitations
 
