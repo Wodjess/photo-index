@@ -377,6 +377,12 @@ def api_search(
 async def api_login(request: Request):
     """Verify username + password, then set the session cookie.
 
+    Accepts both JSON (`{"user": "...", "pass": "..."}`) and form-encoded
+    (`user=...&pass=...`) bodies. The form-encoded path is the no-JS
+    fallback: the SSR `<form>` posts natively to /api/login with the
+    default `application/x-www-form-urlencoded` content type. The JS
+    modal uses JSON via `fetch()` to avoid a page reload.
+
     The frontend never sees the cookie value directly (it is HttpOnly);
     it only needs the 200 vs 401 response to know it can unlock the UI.
     """
@@ -385,14 +391,40 @@ async def api_login(request: Request):
             status_code=400,
             content={"detail": "auth is disabled on this server"},
         )
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
-    if not isinstance(body, dict):
-        return JSONResponse(status_code=400, content={"detail": "expected JSON body"})
-    user = body.get("user", "")
-    pwd = body.get("pass", "")
+    content_type = (request.headers.get("content-type") or "").lower()
+    creds: dict = {}
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            creds = body
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+        except Exception:
+            form = None
+        if form is not None:
+            creds = {k: form.get(k) for k in ("user", "pass")}
+    else:
+        # Unknown content type. Try JSON first, then form. This is a
+        # defensive fallback for clients that omit the content-type header.
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            creds = body
+        else:
+            try:
+                form = await request.form()
+            except Exception:
+                form = None
+            if form is not None:
+                creds = {k: form.get(k) for k in ("user", "pass")}
+    user = creds.get("user", "") or ""
+    pwd  = creds.get("pass", "")  or ""
     if not isinstance(user, str) or not isinstance(pwd, str):
         return JSONResponse(status_code=400, content={"detail": "user and pass must be strings"})
     if not (hmac.compare_digest(user, BASIC_AUTH_USER) and hmac.compare_digest(pwd, BASIC_AUTH_PASS)):

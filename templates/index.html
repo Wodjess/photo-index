@@ -880,7 +880,10 @@
   <script>
     // Only results are passed to JS; the query string lives in the URL.
     window.__INITIAL_RESULTS__ = {{ (results|tojson) if results is defined else '[]' }};
-    window.__AUTH_ENABLED__    = {{ 'true' if auth_enabled else 'false' }};
+    // Emitted as a quoted string ("true" / "false") because the JS check
+    // uses === 'true' to keep the comparison simple and free of truthy/falsy
+    // ambiguity. A bare boolean (no quotes) would compare unequal.
+    window.__AUTH_ENABLED__    = "{{ 'true' if auth_enabled else 'false' }}";
   </script>
   <script type="module" src="/static/app.js" defer></script>
 </body>
