@@ -171,17 +171,23 @@ def _run_subprocess(cmd: list[str], label: str) -> int:
         cwd=str(ROOT),
         env=_child_env(),
         preexec_fn=os.setpgrp,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
     _current_proc = p
+    t0 = time.monotonic()
     try:
-        rc = p.wait()
+        output_bytes, _ = p.communicate()
     finally:
         _current_proc = None
-    if rc != 0:
-        log.error("worker: %s exited with %d", label, rc)
+    duration_s = time.monotonic() - t0
+    output = output_bytes.decode("utf-8", errors="replace") if output_bytes else ""
+    if p.returncode != 0:
+        tail = output[-2000:] if output else "(no output)"
+        log.error("worker: %s exited with %d (duration=%.1fs), output (last 2000 chars):\n%s", label, p.returncode, duration_s, tail)
     else:
-        log.info("worker: %s ok", label)
-    return rc
+        log.info("worker: %s ok (duration=%.1fs)", label, duration_s)
+    return p.returncode
 
 
 def _process_job(job: dict) -> None:
@@ -198,13 +204,14 @@ def _process_job(job: dict) -> None:
         return
 
     log.info("worker: job %s (%d files)", job_id, len(names))
-    tasks.update_job(job_id, status="running", updated=time.time())
 
     if not names:
         tasks.update_job(job_id, status="done", updated=time.time(), error="empty job")
         return
 
     try:
+        tasks.update_job(job_id, status="running", updated=time.time())
+
         moved = _move_into_images(job_id, names)
         if not moved:
             tasks.update_job(
@@ -283,7 +290,7 @@ def _sweep_orphan_jobs() -> None:
     r = tasks.get_redis()
     # Find all job hashes.
     cursor = 0
-    n_swept = 0
+    swept_job_ids: set[str] = set()
     while True:
         cursor, keys = r.scan(cursor=cursor, match=JOB_HASH_PREFIX + "*", count=100)
         for key in keys:
@@ -305,7 +312,7 @@ def _sweep_orphan_jobs() -> None:
                     updated=time.time(),
                 )
                 tasks.cleanup_job_dir(job_id)
-                n_swept += 1
+                swept_job_ids.add(job_id)
         if cursor == 0:
             break
     # Sweep orphan staging dirs (no corresponding hash).
@@ -320,20 +327,23 @@ def _sweep_orphan_jobs() -> None:
             if age > 3600:  # 1h old, definitely orphan
                 log.info("worker: removing orphan staging dir %s (age %.0fs)", d, age)
                 shutil.rmtree(d, ignore_errors=True)
-    # Drain stale entries from the queue. All entries are stale because we
-    # just swept every queued/running job above. New jobs pushed after this
-    # point will be picked up by BLPOP normally.
-    if n_swept:
+    # Drain only the queue entries whose job_id was swept. This avoids
+    # discarding jobs pushed by a concurrent web process between our
+    # scan and the drain loop.
+    if swept_job_ids:
         drained = 0
-        while True:
-            popped = r.lpop(JOB_QUEUE)
-            if popped is None:
-                break
-            drained += 1
+        remaining = r.lrange(JOB_QUEUE, 0, -1) or []
+        for raw in remaining:
+            try:
+                entry = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if entry.get("job_id") in swept_job_ids:
+                r.lrem(JOB_QUEUE, 1, raw)
+                drained += 1
         if drained:
-            log.info("worker: drained %d stale queue entries", drained)
-    if n_swept:
-        log.info("worker: orphan sweep marked %d job(s) as failed", n_swept)
+            log.info("worker: drained %d swept queue entries", drained)
+        log.info("worker: orphan sweep marked %d job(s) as failed", len(swept_job_ids))
 
 
 def main() -> int:
@@ -344,6 +354,16 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     log.info("worker: starting (broker=%s queue=%s)", REDIS_URL, JOB_QUEUE)
+
+    # Startup diagnostics: show resolved paths and initial queue depth.
+    try:
+        _queue_depth = tasks.get_redis().llen(JOB_QUEUE)
+    except Exception:
+        _queue_depth = -1
+    log.info(
+        "worker: config ROOT=%s DATA=%s IMAGES_DIR=%s INDEX_DIR=%s STAGING_DIR=%s queue_depth=%d",
+        ROOT, DATA, IMAGES_DIR, INDEX_DIR, STAGING_DIR, _queue_depth,
+    )
 
     # A5 fix: sweep orphan jobs/staging dirs from a previous worker
     # process that died mid-job. Done before the BLPOP loop so the

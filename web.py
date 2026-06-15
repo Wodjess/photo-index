@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from fastapi import (
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.responses import JSONResponse as StarletteJSONResponse
 
 from config import (
     BASIC_AUTH_PASS,
@@ -47,6 +49,7 @@ from config import (
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_FILES,
     OCR_DIR,
+    REDIS_URL,
     RELOAD_POLL_S,
     RELOAD_SENTINEL,
     DEFAULT_TOP_K,
@@ -54,6 +57,8 @@ from config import (
     SESSION_COOKIE_SECURE,
     SESSION_KEY,
     SESSION_TTL_DAYS,
+    WEB_HOST,
+    WEB_PORT,
 )
 import search as search_mod
 import tasks
@@ -88,6 +93,22 @@ def _ensure_loaded() -> None:
 
 app = FastAPI(title="photo-index", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+# ── request logging middleware ─────────────────────────────────────────────
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    start = time.monotonic()
+    response = await call_next(request)
+    duration_ms = (time.monotonic() - start) * 1000
+    log.info(
+        "web: %s %s -> %s (%.0fms)",
+        request.method,
+        request.url.path + (("?" + request.url.query) if request.url.query else ""),
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 
 # ── background sentinel poller (reloads FAISS/BM25/model on worker write) ──
@@ -160,6 +181,13 @@ async def _warm_up() -> None:
         log.exception("startup warmup failed: %s", e)
         raise
     _sentinel_task = asyncio.create_task(_reload_watcher())
+
+    # Startup diagnostics
+    ntotal = search_mod._INDEX.ntotal if search_mod._INDEX else 0
+    log.info("startup: REDIS_URL=%s", REDIS_URL)
+    log.info("startup: WEB_HOST=%s WEB_PORT=%d", WEB_HOST, WEB_PORT)
+    log.info("startup: auth_enabled=%s", bool(BASIC_AUTH_USER))
+    log.info("startup: index ntotal=%d", ntotal)
 
 
 @app.on_event("shutdown")
@@ -489,12 +517,15 @@ def api_health():
         redis_ok = True
     except Exception as e:
         log.warning("health: redis unavailable: %s", e)
-    return {
-        "status": "ok",
+    body = {
+        "status": "ok" if redis_ok else "degraded",
         "indexed": n,
         "queue_depth": depth,
         "redis": "ok" if redis_ok else "down",
     }
+    if not redis_ok:
+        return StarletteJSONResponse(content=body, status_code=503)
+    return body
 
 
 @app.post("/api/upload")
@@ -581,21 +612,23 @@ def api_delete_image(request: Request, name: str):
 
     ocr_path = Path(manifest[name].get("ocr_path", ""))
     del manifest[name]
-    MANIFEST_PATH.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
 
-    # Delete image + OCR files.
-    import os
+    # Atomic manifest write.
+    manifest_data = json.dumps(manifest, ensure_ascii=False, indent=2)
+    manifest_tmp = MANIFEST_PATH.with_suffix(MANIFEST_PATH.suffix + ".tmp")
+    manifest_tmp.write_text(manifest_data, encoding="utf-8")
+    os.replace(manifest_tmp, MANIFEST_PATH)
+
+    # Rebuild FAISS + BM25 from remaining manifest entries.
+    _rebuild_index(manifest)
+
+    # Delete image + OCR files only after successful rebuild.
     for p in (img_path, ocr_path):
         if p and p.is_file():
             try:
                 p.unlink()
             except OSError as e:
                 log.warning("delete failed %s: %s", p, e)
-
-    # Rebuild FAISS + BM25 from remaining manifest entries.
-    _rebuild_index(manifest)
 
     # Touch sentinel so web worker reloads.
     RELOAD_SENTINEL.write_text("", encoding="utf-8")
@@ -609,7 +642,6 @@ def _rebuild_index(manifest: dict) -> None:
     import io
     import json as _json
     import numpy as np
-    import os
     import pickle
     import re
     from rank_bm25 import BM25Okapi
@@ -698,5 +730,4 @@ def image(name: str):
 
 if __name__ == "__main__":
     import uvicorn
-    from config import WEB_HOST, WEB_PORT
     uvicorn.run(app, host=WEB_HOST, port=WEB_PORT, log_level="info")

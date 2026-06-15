@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import shutil
@@ -32,6 +33,8 @@ from config import (
     MANIFEST_PATH,
     OCR_DIR,
 )
+
+log = logging.getLogger("ocr")
 
 # A16 fix: probe tesseract availability at module import.
 try:
@@ -231,10 +234,9 @@ def run(
         out_file = out_dir / f"{p.stem}.txt"
         if force or not out_file.exists():
             todo.append(p)
-    print(
-        f"source={source_dir} out={out_dir} total={len(images)} "
-        f"to_process={len(todo)} cached={len(images) - len(todo)}",
-        flush=True,
+    log.info(
+        "source=%s out=%s total=%d to_process=%d cached=%d",
+        source_dir, out_dir, len(images), len(todo), len(images) - len(todo),
     )
 
     if not todo:
@@ -249,7 +251,7 @@ def run(
                 path, text, n, blank = fut.result()
             except Exception as e:
                 p = futures[fut]
-                print(f"  ! {p.name}: {e}", file=sys.stderr, flush=True)
+                log.error("  ! %s: %s", p.name, e)
                 continue
             if blank:
                 blanks += 1
@@ -272,13 +274,13 @@ def run(
                 }
             done += 1
             if done % 25 == 0 or done == len(todo):
-                print(f"  ocr {done}/{len(todo)} (blanks={blanks})", flush=True)
+                log.info("  ocr %d/%d (blanks=%d)", done, len(todo), blanks)
 
     if source_dir.resolve() == IMAGES_DIR.resolve():
         save_manifest(manifest)
-        print(
-            f"manifest -> {MANIFEST_PATH} (entries={len(manifest)}, blanks={blanks})",
-            flush=True,
+        log.info(
+            "manifest -> %s (entries=%d, blanks=%d)",
+            MANIFEST_PATH, len(manifest), blanks,
         )
     return manifest
 
@@ -297,6 +299,10 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     args = parse_args()
     run(
         workers=args.workers,

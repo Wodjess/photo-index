@@ -65,18 +65,24 @@ def _load_bm25():
     # A9 fix: integrity check. If the sig file is missing (older index run)
     # we refuse to unpickle rather than silently accept a tampered file.
     if not sig_path.exists():
-        raise SystemExit(
-            f"missing {sig_path} — re-run `python index.py` to regenerate "
-            "the BM25 index with an integrity signature."
+        log.warning(
+            "missing %s — skipping BM25 load (sparse search disabled). "
+            "Re-run `python index.py` to regenerate the BM25 index with an integrity signature.",
+            sig_path,
         )
+        _BM25 = None
+        return None
     expected = sig_path.read_text(encoding="utf-8").strip()
     actual = hashlib.sha256(payload).hexdigest()
     if expected != actual:
-        raise SystemExit(
-            f"BM25 pickle signature mismatch: expected {expected[:12]}…, "
-            f"got {actual[:12]}… — refusing to load a tampered index. "
-            f"Re-run `python index.py`."
+        log.warning(
+            "BM25 pickle signature mismatch: expected %s…, got %s… — "
+            "skipping BM25 load (sparse search disabled). Re-run `python index.py`.",
+            expected[:12],
+            actual[:12],
         )
+        _BM25 = None
+        return None
     data = pickle.loads(payload)
     _BM25 = (data["bm25"], data["names"])
     return _BM25
@@ -115,25 +121,6 @@ def ensure_loaded() -> None:
     log.info("ensure_loaded: index=%d, bm25=%s, model=%s",
              n, _BM25 is not None, EMBED_MODEL)
 
-
-
-
-def reload() -> None:
-    """Force-reload the in-memory index from disk.
-
-    Called by the web process after the worker touches the .reload
-    sentinel (i.e. a successful reindex). The FAISS index is read
-    into memory once; the BM25 pickle is re-read and re-verified
-    against its SHA256 sidecar. The embed model is kept in memory
-    between reloads because it is the slowest thing to load.
-    """
-    global _INDEX, _META, _MANIFEST, _BM25
-    log.info("search.reload: dropping in-memory index/BM25 caches")
-    _INDEX = None
-    _META = None
-    _MANIFEST = None
-    _BM25 = None
-    ensure_loaded()
 
 
 def reload() -> None:
@@ -238,7 +225,11 @@ def search(query: str, top_k: int = 5) -> list[dict]:
         if idx < 0 or idx >= len(names):
             continue
         name = names[idx]
-        ocr_path = Path(_MANIFEST[name]["ocr_path"])
+        entry = _MANIFEST.get(name)
+        if entry is None:
+            log.warning("manifest desync: name %r not in manifest, skipping", name)
+            continue
+        ocr_path = Path(entry["ocr_path"])
         # A17 fix: read_text in try/except, fall back to "" on any error.
         try:
             text = ocr_path.read_text(encoding="utf-8", errors="replace") if ocr_path.exists() else ""
@@ -248,9 +239,9 @@ def search(query: str, top_k: int = 5) -> list[dict]:
         out.append(
             {
                 "name": name,
-                "path": _MANIFEST[name]["path"],
+                "path": entry["path"],
                 "score": float(rrf_score),
-                "chars": _MANIFEST[name].get("chars", 0),
+                "chars": entry.get("chars", 0),
                 "snippet": _make_snippet(text, query),
             }
         )

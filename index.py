@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -39,6 +40,8 @@ from config import (
     EMBEDDINGS_PATH,
 )
 import ocr
+
+log = logging.getLogger("index")
 
 
 def tokenize_for_bm25(text: str) -> list[str]:
@@ -88,11 +91,11 @@ def main() -> None:
 
     manifest = load_manifest()
     names, texts, token_lists = build_passages(manifest)
-    print(f"indexable passages: {len(names)} / {len(manifest)}", flush=True)
+    log.info("indexable passages: %d / %d", len(names), len(manifest))
     if not names:
         raise SystemExit("no OCR text to index — check ocr.py output")
 
-    print(f"loading model {EMBED_MODEL} ...", flush=True)
+    log.info("loading model %s ...", EMBED_MODEL)
     model = SentenceTransformer(EMBED_MODEL)
 
     # Decide which names are new (in --append mode) vs already indexed.
@@ -117,9 +120,9 @@ def main() -> None:
             new_names.append(n)
             new_texts.append(t)
             new_tokens.append(tk)
-        print(
-            f"--append: existing={len(existing_names)} new={len(new_names)}",
-            flush=True,
+        log.info(
+            "--append: existing=%d new=%d",
+            len(existing_names), len(new_names),
         )
     else:
         new_names = names
@@ -139,10 +142,10 @@ def main() -> None:
         (FAISS_PATH.parent / "index_meta.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        print("--append: nothing to add, manifest rewritten", flush=True)
+        log.info("--append: nothing to add, manifest rewritten")
         return
 
-    print(f"encoding {len(new_texts)} new passages (dense, dim={EMBED_DIM}) ...", flush=True)
+    log.info("encoding %d new passages (dense, dim=%d) ...", len(new_texts), EMBED_DIM)
     dense_new = model.encode(
         new_texts,
         batch_size=EMBED_BATCH,
@@ -152,7 +155,7 @@ def main() -> None:
     ).astype("float32")
     dim = dense_new.shape[1]
     if dim != EMBED_DIM:
-        print(f"warning: model dim {dim} != configured EMBED_DIM {EMBED_DIM}", file=sys.stderr)
+        log.warning("model dim %d != configured EMBED_DIM %d", dim, EMBED_DIM)
 
     if args.append and existing_index is not None:
         # Concatenate old embeddings + new ones, then rebuild the index.
@@ -160,11 +163,9 @@ def main() -> None:
         # correct thing is a full FAISS rebuild of (old + new) vectors.
         old_dense = np.load(EMBEDDINGS_PATH, allow_pickle=False).astype("float32")
         if old_dense.shape[1] != dim:
-            print(
-                f"warning: old dim {old_dense.shape[1]} != new dim {dim}; "
-                f"falling back to full rebuild",
-                file=sys.stderr,
-                flush=True,
+            log.warning(
+                "old dim %d != new dim %d; falling back to full rebuild",
+                old_dense.shape[1], dim,
             )
             dense = np.concatenate([np.zeros((0, dim), dtype="float32"), dense_new], axis=0)
         else:
@@ -181,7 +182,7 @@ def main() -> None:
     # faiss.write_index takes a path; we serialize the index to a buffer
     # ourselves to use the same _atomic_write helper.
     import io, hashlib
-    print(f"writing dense index ({index.ntotal} vectors, dim={dim}) ...", flush=True)
+    log.info("writing dense index (%d vectors, dim=%d) ...", index.ntotal, dim)
 
     # faiss-cpu 1.7/1.8 reject a Python BytesIO as the second arg
     # (the C++ overload wants a C FILE* or an IOWriter). Use the
@@ -195,9 +196,9 @@ def main() -> None:
     np.save(emb_buf, np.ascontiguousarray(dense), allow_pickle=False)
     _atomic_write(EMBEDDINGS_PATH, emb_buf.getvalue())
     _atomic_write(FAISS_PATH, faiss_bytes)
-    print(f"dense index -> {FAISS_PATH} (vectors={index.ntotal}, dim={dim})", flush=True)
+    log.info("dense index -> %s (vectors=%d, dim=%d)", FAISS_PATH, index.ntotal, dim)
 
-    print(f"building BM25 over {len(token_lists)} tokenized passages ...", flush=True)
+    log.info("building BM25 over %d tokenized passages ...", len(token_lists))
     bm25 = BM25Okapi(token_lists)
     bm25_path = INDEX_DIR / "bm25.pkl"
     sig_path = INDEX_DIR / "bm25.pkl.sig"
@@ -207,7 +208,7 @@ def main() -> None:
     )
     _atomic_write(bm25_path, payload)
     sig_path.write_text(hashlib.sha256(payload).hexdigest(), encoding="utf-8")
-    print(f"BM25 -> {bm25_path} + {sig_path} ({len(token_lists)} docs)", flush=True)
+    log.info("BM25 -> %s + %s (%d docs)", bm25_path, sig_path, len(token_lists))
 
     meta = {
         "model": EMBED_MODEL,
@@ -223,8 +224,12 @@ def main() -> None:
     meta_tmp = meta_path.with_suffix(".json.tmp")
     meta_tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(meta_tmp, meta_path)
-    print(f"index_meta.json -> {len(names)} names, dim={dim}", flush=True)
+    log.info("index_meta.json -> %d names, dim=%d", len(names), dim)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     main()
