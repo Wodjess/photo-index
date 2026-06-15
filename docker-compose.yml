@@ -40,7 +40,7 @@ services:
       - HF_HOME=/data/.cache
       - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
       - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
-      - PHOTOINDEX_ROOT=/data
+      - PHOTOINDEX_DATA=/data
     volumes:
       - ./data:/data
     depends_on:
