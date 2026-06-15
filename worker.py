@@ -187,6 +187,16 @@ def _run_subprocess(cmd: list[str], label: str) -> int:
 def _process_job(job: dict) -> None:
     job_id = job["job_id"]
     names = job.get("names", [])
+
+    # Guard: skip jobs already marked failed (e.g. by orphan sweep on startup).
+    # Without this check we'd overwrite status to "running" and then fail on
+    # missing staging files that the sweep already deleted.
+    h = tasks.get_job(job_id) or {}
+    cur_status = h.get("status")
+    if cur_status and cur_status != "queued":
+        log.warning("worker: skipping job %s (status=%s, was queued)", job_id, cur_status)
+        return
+
     log.info("worker: job %s (%d files)", job_id, len(names))
     tasks.update_job(job_id, status="running", updated=time.time())
 
@@ -310,6 +320,18 @@ def _sweep_orphan_jobs() -> None:
             if age > 3600:  # 1h old, definitely orphan
                 log.info("worker: removing orphan staging dir %s (age %.0fs)", d, age)
                 shutil.rmtree(d, ignore_errors=True)
+    # Drain stale entries from the queue. All entries are stale because we
+    # just swept every queued/running job above. New jobs pushed after this
+    # point will be picked up by BLPOP normally.
+    if n_swept:
+        drained = 0
+        while True:
+            popped = r.lpop(JOB_QUEUE)
+            if popped is None:
+                break
+            drained += 1
+        if drained:
+            log.info("worker: drained %d stale queue entries", drained)
     if n_swept:
         log.info("worker: orphan sweep marked %d job(s) as failed", n_swept)
 
